@@ -4,6 +4,7 @@ fatal() {
     exit 1
 }
 
+invokedpwd=$(pwd)
 [ -n "$PWMRC" ] || PWMRC=~/.pwmrc
 if [ -f "$PWMRC" ]; then
     [ $(stat -c'%a' "$PWMRC") = 600 ] || fatal "Access mode on \`$PWMRC' is too permissive: please set to 600."
@@ -170,6 +171,26 @@ change_masterpw() {
     done
 }
 
+encrypt_db() {
+    #Encrypt all files in the current directory, which presumably are unencrypted.
+    #Files will be written to a subdirectory "pwmdb".
+    cd "$invokedpwd"
+    pwd
+    old_dbdir=${dbdir}
+    dbdir="pwmdb"
+    mkdir -p -m 700 ${dbdir}
+    for FILE in $(find . -maxdepth 1 -type f) ; do
+        key=$(basename "$FILE")
+        echo "$key"
+        if ! { encrypt < "$key" ; } then
+            echo "An error occurred while encrypting ${key}."
+            break
+        fi
+    done
+    dbdir=${old_dbdir}
+    cd "${dbdir}"
+}
+
 change_keypw() {
     if [ -z "$tmp" ]; then
         with_tempfile change_keypw
@@ -305,7 +326,12 @@ while true; do
             unset masterpw
             echo "forgot master password"
             ;;
-        h) print_help;;
+        h) print_help
+           ;;
+        encryptdb)
+           read_masterpw
+           encrypt_db
+           ;;
         q)
             echo "Bye!"
             break
