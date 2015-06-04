@@ -1,0 +1,12 @@
+README for pwm password manager
+
+pwm is the simplest possible secure, convenient, terminal-based password 
+manager. It uses openssl to symmetrically encrypt arbitrary text (usernames, 
+passwords, or whatever you want) to small files, one per entry.  The default 
+cipher used is aes256, the default location of these files is ~/.pwmdb, and the 
+default editor is vi; all these can be specified on the command line.  The 
+program is a single bash script and requires no arguments for normal operation.
+
+When run, it presents a small menu of choices, including a help choice.  Lookup 
+of stored entries is facilitated with readline, since stored entries are simply 
+files in a directory.
