@@ -1,4 +1,7 @@
 #!/bin/bash
+set -e
+set -o pipefail
+
 fatal() {
     echo "$*" >&2
     exit 1
@@ -10,11 +13,23 @@ if [ -f "$PWMRC" ]; then
     [ $(stat -c'%a' "$PWMRC") = 600 ] || fatal "Access mode on \`$PWMRC' is too permissive: please set to 600."
     . "$PWMRC"
 fi
-[ -n "$cipher" ] || cipher=-aes256
 [ -n "$dbdir" ] || dbdir=~/.pwmdb
 [ -n "$default_pwlen" ] || default_pwlen=30
 [ -n "$EDITOR" ] || EDITOR=vi
-
+if [ -z "$PWMTMP" ] ; then
+    mount -t tmpfs | grep ' /run/user ' > /dev/null
+    if [ $? -eq 0 -a -n "$UID" -a -d /run/user/$UID ] ; then
+        PWMTMP=/run/user/$UID
+    else
+        PWMTMP=$HOME
+    fi
+fi
+[ -n "$GPG_RECIPIENT" ] || GPG_RECIPIENT=""
+if [ -z "$GPG_RECIPIENT" ] ; then
+    GPG_RECIPIENT_OPTION=""
+else
+    GPG_RECIPIENT_OPTION="--recipient=$GPG_RECIPIENT"
+fi
 # this has to be set before we create the history file
 umask 177
 
@@ -30,11 +45,16 @@ if [ -d "$dbdir" ]; then
     cd "$dbdir"
 fi
 
-type openssl 2>/dev/null >&2 || fatal "OpenSSL suite is required to use Password Manager."
+type gpg 2>/dev/null >&2 || fatal "GPG is required to use Password Manager."
 
-set -e
-at_exit="echo 'Operation failed!' >&2"
-trap "$at_exit" EXIT
+at_exit() {
+    rm $PIDFILE
+}
+
+PIDFILE=$dbdir/pwm.pid
+echo $$ > $PIDFILE
+
+trap at_exit EXIT
 
 backup_db() {
     if [ -d "$dbdir" ]; then
@@ -62,50 +82,28 @@ backup_key() {
 }
 
 encrypt() {
-    openssl enc "$cipher" -salt -a -pass env:masterpw >"${dbdir}/${key}" 2> /dev/null
+    gpg --encrypt $GPG_RECIPIENT_OPTION --yes --output "${dbdir}/${key}"
 }
 
 decrypt() {
     if [ -f "${dbdir}/${key}" ]; then
-        < "${dbdir}/${key}" openssl enc "$cipher" -d -a -pass env:masterpw 2> /dev/null
+        < "${dbdir}/${key}" gpg --decrypt --quiet --batch
     else
         echo -n ""
     fi
 }
 
-read_masterpw() {
-    [ -z "$masterpw" ] || return 0
-    stty -echo
-    prompt="$1"
-    [ -n "$prompt" ] || prompt="master password"
-    read -p "${prompt}: "  masterpw; echo
-    stty echo
-    export masterpw
-}
-
-# only prompts for master password and confirmation actually
+# only creates an empty directory actually
 create_db() {
     if [ ! -d "$dbdir" ] ; then
         echo "About to create new password database: \`$dbdir'..."
         mkdir -m 700 "$dbdir"
         cd "$dbdir"
     fi
-    # force read
-    unset masterpw
-    read_masterpw "choose master password"
-    new_masterpw="$masterpw"
-
-    unset masterpw
-    read_masterpw "confirm master password"
-    if [ "$new_masterpw" != "$masterpw" ]; then
-        echo "Confirmation doesn't match master password: operation aborted." >&2
-        unset masterpw
-        false
-    fi
 }
 
 with_tempfile() {
-    tmp=$(tempfile -p .pwm -d "$HOME")
+    tmp=$(tempfile -p .pwm -d "$PWMTMP")
     old_at_exit="$at_exit"
     rm_tempfile_cmd="rm -f -- '$tmp'"
     at_exit="$rm_tempfile_cmd; $old_at_exit"
@@ -128,7 +126,6 @@ lookup() {
         echo "$decrypted" | less
         unset decrypted
     else
-        unset masterpw
         echo 'decryption failed'
     fi
 }
@@ -138,7 +135,6 @@ store_password() {
     if { echo -n "$pw" | encrypt ; } then
         echo "stored"
     else
-        unset masterpw
         echo "storage failed"
     fi
 }
@@ -153,8 +149,6 @@ edit_key() {
             # TODO: check if file was modified actually. mtime?
             encrypt <"$tmp"
             echo "$key updated"
-        else
-            unset masterpw
         fi
     fi
 }
@@ -195,9 +189,8 @@ change_keypw() {
     if [ -z "$tmp" ]; then
         with_tempfile change_keypw
     else
-        if masterpw="$old_masterpw" decrypt >"$tmp"; then
-            masterpw="$new_masterpw" encrypt <"$tmp"
-        fi
+        decrypt >"$tmp"
+        encrypt <"$tmp"
     fi
 }
 
@@ -223,8 +216,6 @@ print_help() {
         echo "g[s]) Generate password (also store in the database)"
     fi
     echo "e) Edit entry"
-    echo "m) Change master password"
-    echo "k) Lock database"
     echo "h) Print this help message"
     echo "q) Quit"
 }
@@ -241,7 +232,6 @@ while true; do
             if [ ! -f ${dbdir}/${key} ] ; then
                 echo "key $key does not exist."
             else
-                read_masterpw
                 lookup || echo "lookup failed"
             fi
             ;;
@@ -251,11 +241,9 @@ while true; do
                 continue
             fi
             read_key "key to copy"
-            read_masterpw
             pw=$(lookup || true)
             if [ -z "$pw" ]; then
                 echo "not found"
-                unset masterpw
             else
                 echo "$pw" | soak_xclip
                 echo "soaked password for paste from X clipboard"
@@ -267,7 +255,6 @@ while true; do
             stty -echo
             read -p "password to store: " pw; echo
             stty echo
-            read_masterpw
             store_password
             unset pw
             ;;
@@ -281,7 +268,6 @@ while true; do
                 if [ "$action" = gs -o "$action" = gsx ]; then
                     [ -d "$dbdir" ] || create_db || continue
                     read_key "key to store"
-                    read_masterpw
                     store_password
                 fi
                 if [ "$action" = gx -o "$action" = gsx ]; then
@@ -292,44 +278,14 @@ while true; do
         e)
             if [ -d "$dbdir" ]; then
                 read_key "key to edit"
-                read_masterpw
             else
                 create_db || continue
             fi
             edit_key
             ;;
-        m)
-            if [ ! -d "$dbdir" ]; then
-                echo "Password database doesn't exist yet: \`$dbdir'"
-                continue
-            fi
-
-            # force read
-            unset masterpw
-            read_masterpw "old master password"
-            old_masterpw="$masterpw"
-
-            unset masterpw
-            read_masterpw "new master password"
-            new_masterpw="$masterpw"
-
-            unset masterpw
-            read_masterpw "confirm new master password"
-            if [ "$new_masterpw" != "$masterpw" ]; then
-                echo "Confirmation doesn't match new master password: operation aborted." >&2
-                unset masterpw
-            else
-                change_masterpw
-            fi
-            ;;
-        k)
-            unset masterpw
-            echo "forgot master password"
-            ;;
         h) print_help
            ;;
         encryptdb)
-           read_masterpw
            encrypt_db
            ;;
         q)
@@ -339,6 +295,5 @@ while true; do
         *) echo "unknown action: 'h' for help";;
     esac
 done
-trap - EXIT
 
 exit 0
