@@ -17,12 +17,14 @@ fi
 [ -n "$default_pwlen" ] || default_pwlen=30
 [ -n "$EDITOR" ] || EDITOR=vi
 if [ -z "$PWMTMP" ] ; then
-    mount -t tmpfs | grep ' /run/user ' > /dev/null
-    if [ $? -eq 0 -a -n "$UID" -a -d /run/user/$UID ] ; then
-        PWMTMP=/run/user/$UID
-    else
-        PWMTMP=$HOME
+    if { mount -t tmpfs | grep ' /run/user ' > /dev/null ; } ; then
+        if [ -n "$UID" -a -d /run/user/$UID ] ; then
+            PWMTMP=/run/user/$UID
+        fi
     fi
+fi
+if [ -z "$PWMTMP" ] ; then
+    PWMTMP=$HOME
 fi
 [ -n "$GPG_RECIPIENT" ] || GPG_RECIPIENT=""
 if [ -z "$GPG_RECIPIENT" ] ; then
